@@ -2,6 +2,6 @@
   "name": "node-app",
   "version": "0.1.0",
   "private": true,
-  "description": "npm still owns these; zed provides @zedtest/node-lib",
+  "description": "npm still owns these; zed provides @zed-pkg-test/node-lib",
   "devDependencies": {}
 }

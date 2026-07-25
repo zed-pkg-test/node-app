@@ -1,5 +1,5 @@
 [package]
-org = "zedtest"
+org = "zed-pkg-test"
 name = "node-app"
 version = "0.1.0"
 description = "A Node app that sources one dep via zed and the rest via npm."
@@ -17,4 +17,4 @@ adapter = "node"
 
 # The FEW deps we source via zed instead of npm.
 [dependencies]
-"zedtest/node-lib" = "^1.0.0"
+"zed-pkg-test/node-lib" = "^1.0.0"

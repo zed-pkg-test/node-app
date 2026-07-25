@@ -1,8 +1,4 @@
-name: zed e2e (node)
-# Proves the "complement npm" model with nothing but GitHub Actions:
-# build the zed CLI, publish the zed-sourced dependency to a hermetic file://
-# registry, install it into .vendor/.zed, and run the app — while npm still
-# owns node_modules.
+name: zed e2e (node + docker)
 on:
   push:
   workflow_dispatch:
@@ -12,43 +8,91 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Shared zed env
+      - name: Prepare the Docker build context
         run: |
-          echo "ZED_PKG_HOME=$RUNNER_TEMP/zed-home"        >> "$GITHUB_ENV"
-          echo "ZED_PKG_REGISTRY=file://$RUNNER_TEMP/zed-reg" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/zed-docker-context"
+          git clone --depth 1 \
+            https://github.com/zed-pkg/zed-interfaces \
+            "$RUNNER_TEMP/zed-docker-context/zed-interfaces"
+          git clone --depth 1 \
+            https://github.com/zed-pkg/zed-cli \
+            "$RUNNER_TEMP/zed-docker-context/zed-cli"
 
-      - name: Build the zed CLI (zed-cli + zed-interfaces must be siblings)
+      - name: Build Node + zed test image
         run: |
-          cd "$RUNNER_TEMP"
-          git clone --depth 1 https://github.com/zed-pkg/zed-interfaces
-          git clone --depth 1 https://github.com/zed-pkg/zed-cli
-          (cd zed-cli && cargo build --release --bin zed --locked)
-          echo "$RUNNER_TEMP/zed-cli/target/release" >> "$GITHUB_PATH"
+          docker build \
+            --file .github/docker/Dockerfile \
+            --tag zed-pkg-test/node-e2e \
+            "$RUNNER_TEMP/zed-docker-context"
 
-      - name: Publish the zed dependency (node-lib) to the file:// registry
+      - name: Publish node-lib inside Docker
         run: |
-          cd "$RUNNER_TEMP"
-          git clone --depth 1 https://github.com/zed-pkg-test/node-lib
-          mkdir -p "$RUNNER_TEMP/zed-reg"
-          (cd node-lib && zed publish --skip-vcs-checks)
+          git clone --depth 1 \
+            https://github.com/zed-pkg-test/node-lib \
+            "$RUNNER_TEMP/node-lib"
+          mkdir -p "$RUNNER_TEMP/zed-registry" "$RUNNER_TEMP/zed-home"
+          docker run --rm \
+            --volume "$RUNNER_TEMP/node-lib:/package" \
+            --volume "$RUNNER_TEMP/zed-registry:/registry" \
+            --workdir /package \
+            zed-pkg-test/node-e2e \
+            zed publish --registry file:///registry --skip-vcs-checks
 
-      - name: npm owns node_modules
-        run: npm install --no-audit --no-fund
-
-      - name: zed sources the select deps into .vendor/.zed
+      - name: Symlink install works with its store mounted
         run: |
-          zed install
-          test -e .vendor/.zed/zedtest/node-lib || { echo "missing .vendor/.zed tree"; exit 1; }
-          test -e node_modules/@zedtest/node-lib || { echo "node adapter did not link into node_modules"; exit 1; }
-          echo "node_path=$(cat .zed/node_path)"
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/work" \
+            --volume "$RUNNER_TEMP/zed-registry:/registry:ro" \
+            --volume "$RUNNER_TEMP/zed-home:/zed-home" \
+            --workdir /work \
+            zed-pkg-test/node-e2e \
+            sh -euc '
+              zed install \
+                --registry file:///registry \
+                --home /zed-home \
+                --install-mode symlink
+              test -L .vendor/.zed/zed-pkg-test/node-lib
+              test -L node_modules/@zed-pkg-test/node-lib
+              node src/main.js
+            '
 
-      - name: Run the app (resolves the zed dep via node_modules)
-        run: node src/main.js
+      - name: Symlink install fails without its store mount
+        run: |
+          if docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/work:ro" \
+            --workdir /work \
+            node:22-bookworm-slim \
+            node src/main.js
+          then
+            echo "expected the unmounted store-backed symlinks to fail"
+            exit 1
+          fi
 
-      - name: NODE_PATH resolution also works
-        run: NODE_PATH="$(cat .zed/node_path)" node -e 'console.log(require("zedtest/node-lib").greet("NODE_PATH"))'
+      - name: Frozen copy install contains no store symlinks
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/work" \
+            --volume "$RUNNER_TEMP/zed-registry:/registry:ro" \
+            --volume "$RUNNER_TEMP/zed-home:/zed-home" \
+            --workdir /work \
+            zed-pkg-test/node-e2e \
+            sh -euc '
+              zed install \
+                --frozen \
+                --registry file:///registry \
+                --home /zed-home \
+                --install-mode copy
+              test ! -L .vendor/.zed/zed-pkg-test/node-lib
+              test ! -L node_modules/@zed-pkg-test/node-lib
+              test -z "$(find .vendor/.zed node_modules/@zed-pkg-test -type l -print -quit)"
+              node src/main.js
+            '
+
+      - name: Copy install runs in a fresh Node container
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/work:ro" \
+            --workdir /work \
+            node:22-bookworm-slim \
+            node src/main.js
