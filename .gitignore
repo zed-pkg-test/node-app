@@ -1,0 +1,4 @@
+node_modules/
+.vendor/
+.zed/
+.zpkg.lock

@@ -1,0 +1,20 @@
+[package]
+org = "zedtest"
+name = "node-app"
+version = "0.1.0"
+description = "A Node app that sources one dep via zed and the rest via npm."
+license = "MIT"
+
+[package.repository]
+vcs = "git"
+url = "https://github.com/zed-pkg-test/node-app"
+
+# Put zed-sourced deps here (not in node_modules root); the node adapter still
+# links them into node_modules/@org/name and writes .zed/node_path.
+[install]
+dir = ".vendor/.zed"
+adapter = "node"
+
+# The FEW deps we source via zed instead of npm.
+[dependencies]
+"zedtest/node-lib" = "^1.0.0"

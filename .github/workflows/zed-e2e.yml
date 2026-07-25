@@ -1,0 +1,54 @@
+name: zed e2e (node)
+# Proves the "complement npm" model with nothing but GitHub Actions:
+# build the zed CLI, publish the zed-sourced dependency to a hermetic file://
+# registry, install it into .vendor/.zed, and run the app — while npm still
+# owns node_modules.
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Shared zed env
+        run: |
+          echo "ZED_PKG_HOME=$RUNNER_TEMP/zed-home"        >> "$GITHUB_ENV"
+          echo "ZED_PKG_REGISTRY=file://$RUNNER_TEMP/zed-reg" >> "$GITHUB_ENV"
+
+      - name: Build the zed CLI (zed-cli + zed-interfaces must be siblings)
+        run: |
+          cd "$RUNNER_TEMP"
+          git clone --depth 1 https://github.com/zed-pkg/zed-interfaces
+          git clone --depth 1 https://github.com/zed-pkg/zed-cli
+          (cd zed-cli && cargo build --release --bin zed --locked)
+          echo "$RUNNER_TEMP/zed-cli/target/release" >> "$GITHUB_PATH"
+
+      - name: Publish the zed dependency (node-lib) to the file:// registry
+        run: |
+          cd "$RUNNER_TEMP"
+          git clone --depth 1 https://github.com/zed-pkg-test/node-lib
+          mkdir -p "$RUNNER_TEMP/zed-reg"
+          (cd node-lib && zed publish --skip-vcs-checks)
+
+      - name: npm owns node_modules
+        run: npm install --no-audit --no-fund
+
+      - name: zed sources the select deps into .vendor/.zed
+        run: |
+          zed install
+          test -e .vendor/.zed/zedtest/node-lib || { echo "missing .vendor/.zed tree"; exit 1; }
+          test -e node_modules/@zedtest/node-lib || { echo "node adapter did not link into node_modules"; exit 1; }
+          echo "node_path=$(cat .zed/node_path)"
+
+      - name: Run the app (resolves the zed dep via node_modules)
+        run: node src/main.js
+
+      - name: NODE_PATH resolution also works
+        run: NODE_PATH="$(cat .zed/node_path)" node -e 'console.log(require("zedtest/node-lib").greet("NODE_PATH"))'
