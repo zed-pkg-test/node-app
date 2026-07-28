@@ -71,12 +71,20 @@ PY
     node:22-bookworm-slim \
     node -e 'const {greet}=require("./src"); if(greet("fixture")!=="hello fixture from @zed-pkg-test/node-lib") process.exit(1)'
 
+  test -z "$(git -C "$NODE_LIB" status --porcelain)"
   docker run --rm \
-    --volume "$NODE_LIB:/package:ro" \
+    --volume "$NODE_LIB:/source:ro" \
     --volume "$REGISTRY:/registry" \
-    --workdir /package \
+    --workdir /tmp \
     "$IMAGE" \
-    zed publish --registry file:///registry --skip-vcs-checks
+    sh -euc '
+      cp -a /source /tmp/package
+      chmod -R u+w /tmp/package
+      cd /tmp/package
+      zed publish --registry file:///registry --skip-vcs-checks
+    '
+  test -z "$(git -C "$NODE_LIB" status --porcelain)"
+  test "$(git -C "$NODE_LIB" rev-parse HEAD)" = "$NODE_LIB_REF"
   if ! find "$REGISTRY" -type f -print -quit | grep -q .; then
     echo "zed publish produced no registry artifact" >&2
     exit 1
