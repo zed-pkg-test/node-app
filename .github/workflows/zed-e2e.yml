@@ -16,7 +16,7 @@ concurrency:
 env:
   ZED_INTERFACES_REF: 61f654d5e4ca718abc4a280a641472466689c278
   ZED_CLI_REF: 359ea72e21027ed54a29fad95b05f38a1ea142c3
-  NODE_LIB_REF: 7ec5a99da1e5a73209499b750147c5b0b825cb42
+  NODE_LIB_REF: 2d41e658a382fdff27ef87a0db24dbaff280a685
 
 jobs:
   test:
@@ -36,4 +36,16 @@ jobs:
         run: bash -n scripts/zed-e2e.sh
 
       - name: Run pinned cross-container interoperability suite
-        run: bash scripts/zed-e2e.sh
+        shell: bash
+        run: |
+          set -o pipefail
+          bash scripts/zed-e2e.sh 2>&1 | tee "$RUNNER_TEMP/zed-node-e2e.log"
+
+      - name: Upload interoperability diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: zed-node-e2e-log
+          path: ${{ runner.temp }}/zed-node-e2e.log
+          if-no-files-found: warn
+          retention-days: 7
