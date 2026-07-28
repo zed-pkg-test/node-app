@@ -1,52 +1,128 @@
 name: zed e2e (node + docker)
+
 on:
+  pull_request:
   push:
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZED_INTERFACES_REF: 61f654d5e4ca718abc4a280a641472466689c278
+  ZED_CLI_REF: 359ea72e21027ed54a29fad95b05f38a1ea142c3
+  NODE_LIB_REF: 7ec5a99da1e5a73209499b750147c5b0b825cb42
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - name: Prepare the Docker build context
+      - name: Validate workflow
+        uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+        with:
+          args: .github/workflows/zed-e2e.yml
+
+      - name: Verify app and Zed metadata
+        shell: bash
         run: |
-          mkdir -p "$RUNNER_TEMP/zed-docker-context"
-          git clone --depth 1 \
-            https://github.com/zed-pkg/zed-interfaces \
-            "$RUNNER_TEMP/zed-docker-context/zed-interfaces"
-          git clone --depth 1 \
-            https://github.com/zed-pkg/zed-cli \
-            "$RUNNER_TEMP/zed-docker-context/zed-cli"
+          set -euo pipefail
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/work:ro" \
+            --workdir /work \
+            node:22-bookworm-slim \
+            npm run check
+          python3 - <<'PY'
+          import json
+          import tomllib
+          from pathlib import Path
+
+          native = json.loads(Path("package.json").read_text())
+          with Path(".zpkg.toml").open("rb") as handle:
+              zed = tomllib.load(handle)
+          package = zed["package"]
+          assert native["name"] == package["name"]
+          assert native["version"] == package["version"]
+          assert native["license"] == package["license"]
+          assert package["org"] == "zed-pkg-test"
+          assert zed["dependencies"] == {"zed-pkg-test/node-lib": "^1.0.0"}
+          PY
+
+      - name: Prepare immutable Docker build context
+        shell: bash
+        run: |
+          set -euo pipefail
+          context="$RUNNER_TEMP/zed-docker-context"
+          mkdir -p "$context"
+          clone_at() {
+            repo="$1"
+            ref="$2"
+            destination="$3"
+            git init -q "$destination"
+            git -C "$destination" remote add origin "$repo"
+            git -C "$destination" fetch --depth 1 origin "$ref"
+            git -C "$destination" checkout -q --detach FETCH_HEAD
+            test "$(git -C "$destination" rev-parse HEAD)" = "$ref"
+          }
+          clone_at https://github.com/zed-pkg/zed-interfaces.git \
+            "$ZED_INTERFACES_REF" "$context/zed-interfaces"
+          clone_at https://github.com/zed-pkg/zed-cli.git \
+            "$ZED_CLI_REF" "$context/zed-cli"
 
       - name: Build Node + zed test image
         run: |
           docker build \
             --file .github/docker/Dockerfile \
-            --tag zed-pkg-test/node-e2e \
+            --tag zed-pkg-test/node-e2e:${GITHUB_SHA} \
             "$RUNNER_TEMP/zed-docker-context"
 
-      - name: Publish node-lib inside Docker
+      - name: Fetch and verify the exact node-lib fixture
+        shell: bash
         run: |
-          git clone --depth 1 \
-            https://github.com/zed-pkg-test/node-lib \
-            "$RUNNER_TEMP/node-lib"
+          set -euo pipefail
+          destination="$RUNNER_TEMP/node-lib"
+          git init -q "$destination"
+          git -C "$destination" remote add origin https://github.com/zed-pkg-test/node-lib.git
+          git -C "$destination" fetch --depth 1 origin "$NODE_LIB_REF"
+          git -C "$destination" checkout -q --detach FETCH_HEAD
+          test "$(git -C "$destination" rev-parse HEAD)" = "$NODE_LIB_REF"
+          docker run --rm \
+            --volume "$destination:/package:ro" \
+            --workdir /package \
+            node:22-bookworm-slim \
+            node -e 'const {greet}=require("./src"); if(greet("fixture")!=="hello fixture from @zed-pkg-test/node-lib") process.exit(1)'
+
+      - name: Publish node-lib inside Docker
+        shell: bash
+        run: |
+          set -euo pipefail
           mkdir -p "$RUNNER_TEMP/zed-registry" "$RUNNER_TEMP/zed-home"
           docker run --rm \
-            --volume "$RUNNER_TEMP/node-lib:/package" \
+            --volume "$RUNNER_TEMP/node-lib:/package:ro" \
             --volume "$RUNNER_TEMP/zed-registry:/registry" \
             --workdir /package \
-            zed-pkg-test/node-e2e \
+            zed-pkg-test/node-e2e:${GITHUB_SHA} \
             zed publish --registry file:///registry --skip-vcs-checks
+          test -n "$(find "$RUNNER_TEMP/zed-registry" -type f -print -quit)"
 
       - name: Symlink install works with its store mounted
         run: |
+          rm -rf .vendor/.zed node_modules .zed
           docker run --rm \
             --volume "$GITHUB_WORKSPACE:/work" \
             --volume "$RUNNER_TEMP/zed-registry:/registry:ro" \
             --volume "$RUNNER_TEMP/zed-home:/zed-home" \
             --workdir /work \
-            zed-pkg-test/node-e2e \
+            zed-pkg-test/node-e2e:${GITHUB_SHA} \
             sh -euc '
               zed install \
                 --registry file:///registry \
@@ -54,7 +130,7 @@ jobs:
                 --install-mode symlink
               test -L .vendor/.zed/zed-pkg-test/node-lib
               test -L node_modules/@zed-pkg-test/node-lib
-              node src/main.js
+              npm start
             '
 
       - name: Symlink install fails without its store mount
@@ -63,7 +139,7 @@ jobs:
             --volume "$GITHUB_WORKSPACE:/work:ro" \
             --workdir /work \
             node:22-bookworm-slim \
-            node src/main.js
+            npm start
           then
             echo "expected the unmounted store-backed symlinks to fail"
             exit 1
@@ -76,7 +152,7 @@ jobs:
             --volume "$RUNNER_TEMP/zed-registry:/registry:ro" \
             --volume "$RUNNER_TEMP/zed-home:/zed-home" \
             --workdir /work \
-            zed-pkg-test/node-e2e \
+            zed-pkg-test/node-e2e:${GITHUB_SHA} \
             sh -euc '
               zed install \
                 --frozen \
@@ -86,7 +162,7 @@ jobs:
               test ! -L .vendor/.zed/zed-pkg-test/node-lib
               test ! -L node_modules/@zed-pkg-test/node-lib
               test -z "$(find .vendor/.zed node_modules/@zed-pkg-test -type l -print -quit)"
-              node src/main.js
+              npm start
             '
 
       - name: Copy install runs in a fresh Node container
@@ -95,4 +171,4 @@ jobs:
             --volume "$GITHUB_WORKSPACE:/work:ro" \
             --workdir /work \
             node:22-bookworm-slim \
-            node src/main.js
+            npm start
