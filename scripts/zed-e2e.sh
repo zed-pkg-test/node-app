@@ -36,7 +36,11 @@ prepare() {
     node:22-bookworm-slim \
     npm run check
 
-  python3 - <<'PY'
+  docker run --rm -i \
+    --volume "$WORKSPACE:/work:ro" \
+    --workdir /work \
+    python:3.12-bookworm \
+    python3 - <<'PY'
 import json
 import tomllib
 from pathlib import Path
